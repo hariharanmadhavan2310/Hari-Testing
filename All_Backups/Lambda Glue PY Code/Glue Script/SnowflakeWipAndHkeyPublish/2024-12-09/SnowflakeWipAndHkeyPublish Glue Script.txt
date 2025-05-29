@@ -1,0 +1,172 @@
+import sys
+import json
+import boto3
+import base64
+import requests
+import traceback
+import pandas as pd
+import numpy as np
+import snowflake.connector
+import datetime
+from awsglue.utils import getResolvedOptions
+from time import gmtime, strftime
+#from datetime import datetime, timedelta
+from botocore.exceptions import ClientError
+import time
+import time
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+import smtplib
+from smtplib import SMTPException
+from base64 import b64encode, b64decode
+
+s3_resource = boto3.resource('s3' )
+
+def s3delete(bucket_name,prefix):
+    #bucket_name = "skyanalyst"
+    #prefix = "V4_CTELL/WIP_STAGING/PUBLISH/HKEY_CURRENT/"  # Folder path with trailing slash s3://skyanalyst/V4_CTELL/WIP_STAGING/PUBLISH/HKEY_CURRENT/
+
+    # Get S3 client
+    s3_client = boto3.client('s3')
+
+    try:
+        # List objects with the specified prefix
+        paginator = s3_client.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+        for page in pages:
+            for item in page.get('Contents', []):
+            # Delete each object (file)
+                s3_client.delete_object(Bucket=bucket_name, Key=item['Key'])
+        print(f"Successfully deleted files from folder: {prefix}")
+    except Exception as e:
+        print(f"Error deleting files: {e}")
+        raise e  # Re-raise for Lambda to report error
+
+    return {
+      'statusCode': 200,
+      'body': 'Files deleted successfully'
+    }
+
+def get_secret():
+    secret_name = "arn:aws:secretsmanager:us-east-1:591885183981:secret:snowflake_enc-ZcC4D8"
+    secret_name1 = "arn:aws:secretsmanager:us-east-1:591885183981:secret:mail_enc-RfRdHw"
+    region_name = "us-east-1"
+    session = boto3.session.Session()
+    secret = ''
+    secret1 = ''
+    client = session.client(
+        service_name='secretsmanager',
+        region_name=region_name
+    )
+    try:
+        get_secret_value_response = client.get_secret_value(
+            SecretId=secret_name
+        )
+        get_secret_value_response1 = client.get_secret_value(
+            SecretId=secret_name1
+        )
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'DecryptionFailureException':
+            raise e
+        elif e.response['Error']['Code'] == 'InternalServiceErrorException':
+            raise e
+        elif e.response['Error']['Code'] == 'InvalidParameterException':
+            raise e
+        elif e.response['Error']['Code'] == 'InvalidRequestException':
+            raise e
+        elif e.response['Error']['Code'] == 'ResourceNotFoundException':
+            raise e
+    else:
+        if ('SecretString' in get_secret_value_response) and ('SecretString' in get_secret_value_response1):
+            secret = get_secret_value_response['SecretString']
+            secret1 = get_secret_value_response1['SecretString']
+            return str(secret)+"~"+str(secret1)
+        else:
+            return None
+            
+def snowflakequeryexecution(sql_file_name):
+    print(sql_file_name)
+    if '.sql' in sql_file_name :
+        con = snowflake.connector.connect(account = 'sciera',user = user_name,password = pass_word,role='RW_PROD',warehouse='mrg_wh', database='SCIERA_SUBSYSTEM', schema='SKY_BIX_REAL_ESTATE')
+        cur = con.cursor()
+        sql_file_name = sql_file_name.replace('s3://','')
+        sql_bucket_name = sql_file_name[:sql_file_name.index('/')]
+        sql_key_path = sql_file_name[sql_file_name.index('/')+1:]
+        
+        obj = s3_resource.Object(sql_bucket_name, sql_key_path)
+        query_content = str(obj.get()['Body'].read().decode('utf-8')).replace('\r','').replace('\n',' ')
+        snowflake_query_string = ""
+        query_list = query_content.split(';')
+        for snowflake_query_string in query_list:
+            snowflake_query_string = snowflake_query_string.strip()
+            #snowflake_query_string = snowflake_query_string.replace('<<YYYYMMDD>>',current_date)
+            print(snowflake_query_string)
+            cur.execute(snowflake_query_string)
+  
+        cur.close()
+        con.close()
+  
+try:
+    snowflake_query_string = ''
+    credential = get_secret().split("~")#.replace('"','').replace('uname_pwd:','').replace('mail_enc:','')
+    sf_cred = credential[0].replace('"','').replace('uname_pwd:','')
+    mail_cred = credential[1].replace('"','').replace('mail_enc:','')
+    sf_credentials = base64.b64decode(sf_cred)
+    mail_credentials = base64.b64decode(mail_cred)
+    sf_credentials_out = sf_credentials.decode('utf-8')
+    sf_credentials_out = sf_credentials_out.split("|")
+    mail_credentials_out = mail_credentials.decode('utf-8')
+    mail_credentials_out = mail_credentials_out.split("|")
+    user_name = sf_credentials_out[0]
+    pass_word = sf_credentials_out[1]
+    user_name1 = mail_credentials_out[0]
+    pass_word1 = mail_credentials_out[1]
+    #user_name = credentials[5].replace('"USERNAME":','').replace('"','')
+    #pass_word = credentials[6].replace('"PASSWORD":','').replace('"}','').replace('"','')
+    ts = time.time()
+    tdy = datetime.datetime.now()
+    today = tdy + datetime.timedelta(hours=5, minutes=30)
+    yesterday = today - datetime.timedelta(days=1)
+    daybeforeyesterday = today - datetime.timedelta(days=2)
+    nextdate = today - datetime.timedelta(days=-1)
+    rundate2 = nextdate.strftime('%Y%m%d')
+    current_date =  today.strftime('%Y-%m-%d')
+    #currentdatepath1 = ''+current_date+'_set1'
+    current_date_split = nextdate.strftime('%Y-%m-%d')
+    current_date_split1 = today.strftime('%Y-%m-%d')
+    filedate1 =  today.strftime('%Y/%b/%Y-%m-%d').lower()
+    filedate2 =  yesterday.strftime('%Y/%b/%Y-%m-%d').lower()
+    filedate3 =  daybeforeyesterday.strftime('%Y/%b/%Y-%m-%d').lower()
+    YEAR = nextdate.strftime('%Y').lower()
+    MONTH = nextdate.strftime('%b')
+    DATE = nextdate.strftime('%Y%m%d').lower()
+    YEAR1 = today.strftime('%Y').lower()
+    MONTH1 = today.strftime('%b')
+    DATE1 = today.strftime('%Y%m%d').lower()
+    print(current_date)
+    args = getResolvedOptions(sys.argv, ['filename'])
+    #folderdate = datetime.datetime.fromtimestamp(ts).strftime('%m_%d_%Y_%H_%M_%S')
+    #print(folderdate)
+    
+    # delete From s3 
+    bucketname = 'skyanalyst'
+    hkeypath = "V4_CTELL/WIP_STAGING/PUBLISH/HKEY_CURRENT/" 
+    wippath = "V4_CTELL/WIP_STAGING/PUBLISH/WIP_CURRENT/" 
+    hkeyopenpath = "V4_CTELL/WIP_STAGING/PUBLISH/HKEY_CURRENT_OPEN/" 
+
+    s3delete(bucketname,hkeypath)
+    s3delete(bucketname,wippath)
+    s3delete(bucketname,hkeyopenpath)
+
+    file_name = args['filename']
+    sql_file_name = 's3://skyctel/Production/GlueScripts/Wip_Staging/'+file_name
+    snowflakequeryexecution(sql_file_name)
+    #sql_file_name = 's3://skyctel/Production/GlueScripts/Wip_Staging/ROLLUPS/QS_DASHBOARD_ROLLUPS.sql'
+    #snowflakequeryexecution(sql_file_name)
+    
+
+except:
+    error_string = traceback.format_exc()
+    print(error_string)
+
